@@ -1,5 +1,13 @@
 Revision history for Perl extension Audio::FLAC.
 
+1.2  Tue Nov 16 14:29:25 PST 2004
+
+	- Make PADDING blocks be filled will nulls, not spaces.
+
+	- Always write out the fLaC header.
+
+	- Add in a hack to make write() work again.
+
 1.1  Fri Oct  1 21:50:33 PDT 2004
 
         - Fixed application ID parsing in XS code.

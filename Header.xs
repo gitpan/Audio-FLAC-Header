@@ -1,4 +1,4 @@
-/* $Id: Header.xs,v 1.2 2004/10/02 20:07:23 daniel Exp $ */
+/* $Id: Header.xs,v 1.3 2004/11/16 22:33:43 daniel Exp $ */
 
 /* This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -290,6 +290,8 @@ void print_error_with_chain_status(FLAC__Metadata_Chain *chain, const char *form
 
 MODULE = Audio::FLAC::Header PACKAGE = Audio::FLAC::Header
 
+PROTOTYPES: DISABLE
+
 SV*
 new_XS(class, path)
 	char *class;
@@ -403,6 +405,8 @@ new_XS(class, path)
 
 		my_hv_store(self, "bitRate", newSVnv(8.0 * (st.st_size - len) / totalSeconds));
 	}
+
+	my_hv_store(self, "filename", newSVpv(path, 0));
 
 	/* Bless the hashref to create a class object */
 	sv_bless(obj_ref, gv_stashpv(class, FALSE));

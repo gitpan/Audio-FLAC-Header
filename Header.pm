@@ -1,12 +1,12 @@
 package Audio::FLAC::Header;
 
-# $Id: Header.pm,v 1.9 2004/10/02 20:07:23 daniel Exp $
+# $Id: Header.pm,v 1.10 2004/11/16 22:33:43 daniel Exp $
 
 use strict;
-use vars qw($VERSION);
+use vars qw($VERSION $HAVE_XS);
 use File::Basename;
 
-$VERSION = '1.1';
+$VERSION = '1.2';
 
 # First four bytes of stream are always fLaC
 use constant FLACHEADERFLAG => 'fLaC';
@@ -32,7 +32,7 @@ XS_BOOT: {
 	# DynaLoader calls dl_load_flags as a static method.
 	*dl_load_flags = DynaLoader->can('dl_load_flags');
 
-	my $HAVE_XS = eval {
+	$HAVE_XS = eval {
 
 		do {__PACKAGE__->can('bootstrap') || \&DynaLoader::bootstrap}->(__PACKAGE__, $VERSION);
 
@@ -47,6 +47,7 @@ XS_BOOT: {
 sub new_PP {
 	my $class = shift;
 	my $file  = shift;
+	my $writeHack = shift;
 	my $errflag = 0;
 
 	my $self  = {};
@@ -84,41 +85,45 @@ sub new_PP {
 		return $self;
 	};
 
-	# Parse streaminfo
-	$errflag = $self->_parseStreaminfo();
-	if ($errflag < 0) {
-		warn "[$file] Can't find streaminfo metadata block!";
-		close FILE;
-		undef $self->{'fileHandle'};
-		return $self;
-	};
+	# This is because we don't write out tags in XS yet.
+	unless ($writeHack) {
 
-	# Parse vorbis tags
-	$errflag = $self->_parseVorbisComments();
-	if ($errflag < 0) {
-		warn "[$file] Can't find/parse vorbis comment metadata block!";
-		close FILE;
-		undef $self->{'fileHandle'};
-		return $self;
-	};
+		# Parse streaminfo
+		$errflag = $self->_parseStreaminfo();
+		if ($errflag < 0) {
+			warn "[$file] Can't find streaminfo metadata block!";
+			close FILE;
+			undef $self->{'fileHandle'};
+			return $self;
+		};
 
-	# Parse cuesheet
-	$errflag = $self->_parseCueSheet();
-	if ($errflag < 0) {
-		warn "[$file] Problem parsing cuesheet metadata block!";
-		close FILE;
-		undef $self->{'fileHandle'};
-		return $self;
-	};
+		# Parse vorbis tags
+		$errflag = $self->_parseVorbisComments();
+		if ($errflag < 0) {
+			warn "[$file] Can't find/parse vorbis comment metadata block!";
+			close FILE;
+			undef $self->{'fileHandle'};
+			return $self;
+		};
 
-	# Parse third-party application metadata block
-	$errflag = $self->_parseAppBlock();
-	if ($errflag < 0) {
-		warn "[$file] Problem parsing application metadata block!";
-		close FILE;
-		undef $self->{'fileHandle'};
-		return $self;
-	};
+		# Parse cuesheet
+		$errflag = $self->_parseCueSheet();
+		if ($errflag < 0) {
+			warn "[$file] Problem parsing cuesheet metadata block!";
+			close FILE;
+			undef $self->{'fileHandle'};
+			return $self;
+		};
+
+		# Parse third-party application metadata block
+		$errflag = $self->_parseAppBlock();
+		if ($errflag < 0) {
+			warn "[$file] Problem parsing application metadata block!";
+			close FILE;
+			undef $self->{'fileHandle'};
+			return $self;
+		};
+	}
 
 	close FILE;
 	undef $self->{'fileHandle'};
@@ -172,12 +177,31 @@ sub application {
 sub write {
 	my $self = shift;
 
+	# XXX - this is a hack until I do metadata writing in XS
+	# Very ugly, I know.
+	if ($HAVE_XS) {
+
+		# Make a copy of these - otherwise we'll refcnt++
+		my %tags = %{$self->{'tags'}};
+		my %info = %{$self->{'info'}};
+
+		my $filename = $self->{'filename'};
+		my $class    = ref($self);
+
+		undef $self;
+
+		$self = $class->new_PP($filename, 1);
+
+		$self->{'tags'} = \%tags;
+		$self->{'info'} = \%info;
+	}
+
 	my @tagString = ();
 	my $numTags   = 0;
 
 	my ($idxVorbis,$idxPadding);
 	my $totalAvail = 0;
-	my $metadataBlocks = '';
+	my $metadataBlocks = FLACHEADERFLAG;
 	my $tmpnum;
 
 	# Make a list of the tags and lengths for packing into the vorbis metadata block
@@ -244,12 +268,12 @@ sub write {
 
 	# Is there a Padding block?
 	# Change the padding to reflect the new vorbis comment size
-	if ($idxPadding<0) {
+	if ($idxPadding < 0) {
 		# no padding block
-		_addNewMetadataBlock($self, BT_PADDING , ' ' x ($totalAvail - length($vorbisComment)));
+		_addNewMetadataBlock($self, BT_PADDING , "\0" x ($totalAvail - length($vorbisComment)));
 	} else {
 		# update the padding block
-		_updateMetadataBlock($self, $idxPadding, ' ' x ($totalAvail - length($vorbisComment)));
+		_updateMetadataBlock($self, $idxPadding, "\0" x ($totalAvail - length($vorbisComment)));
 	}
 
 	# Create the metadata block structure for the FLAC file
@@ -264,9 +288,6 @@ sub write {
 	# open FLAC file and write new metadata blocks
 	open FLACFILE, "+<$self->{'filename'}" or return -1;
 	binmode FLACFILE;
-
-	# seek to the location of the existing metadata blocks
-	seek FLACFILE, ($self->{'startMetadataBlocks'})-4, 0;
 
 	# overwrite the existing metadata blocks
 	print FLACFILE $metadataBlocks or return -1;
