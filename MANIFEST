@@ -3,6 +3,7 @@ Makefile.PL
 MANIFEST
 README
 data/test.flac
+data/id3tagged.flac
 data/appId.flac
 t/basic.t
 t/pod.t

@@ -1,12 +1,12 @@
 package Audio::FLAC::Header;
 
-# $Id: Header.pm,v 1.10 2004/11/16 22:33:43 daniel Exp $
+# $Id: Header.pm,v 1.11 2005/02/16 22:01:37 daniel Exp $
 
 use strict;
 use vars qw($VERSION $HAVE_XS);
 use File::Basename;
 
-$VERSION = '1.2';
+$VERSION = '1.3';
 
 # First four bytes of stream are always fLaC
 use constant FLACHEADERFLAG => 'fLaC';
@@ -490,7 +490,7 @@ sub _parseVorbisComments {
 		push(@$rawTags, $tagStr);
 
 		# Match the key and value
-		if ($tagStr =~ /^(.*?)=(.*)$/) {
+		if ($tagStr =~ /^(.*?)=(.*)$/s) {
 			# Make the key uppercase
 			my $tkey = $1;
 			$tkey =~ tr/a-z/A-Z/;

@@ -1,4 +1,4 @@
-/* $Id: Header.xs,v 1.3 2004/11/16 22:33:43 daniel Exp $ */
+/* $Id: Header.xs,v 1.4 2005/02/16 22:01:37 daniel Exp $ */
 
 /* This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -29,6 +29,9 @@
 #endif
 
 #include <FLAC/all.h>
+
+#define FLACHEADERFLAG "fLaC"
+#define ID3HEADERFLAG  "ID3"
 
 /* strlen the length automatically */
 #define my_hv_store(a,b,c)   hv_store(a,b,strlen(b),c,0)
@@ -86,9 +89,11 @@ void _read_metadata(HV *self, char *path, FLAC__StreamMetadata *block, unsigned 
 			totalSeconds = block->data.stream_info.total_samples / (float)block->data.stream_info.sample_rate;
 
 			if (totalSeconds <= 0) {
-				warn("totalSeconds is 0 - we couldn't find either TOTALSAMPLES or SAMPLERATE!\n",
-					"setting totalSeconds to 1 to avoid divide by zero error!\n"
-				);
+				warn(sprintf("File: %s - %s\n%s\n",
+					path,
+					"totalSeconds is 0 - we couldn't find either TOTALSAMPLES or SAMPLERATE!",
+					"setting totalSeconds to 1 to avoid divide by zero error!"
+				));
 
 				totalSeconds = 1;
 			}
@@ -136,7 +141,7 @@ void _read_metadata(HV *self, char *path, FLAC__StreamMetadata *block, unsigned 
 		{
 			/* store the pointer location of the '=', poor man's split() */
 			char *half;
-			AV   *rawTagArray = newAV();;
+			AV   *rawTagArray = newAV();
 			HV   *tags = newHV();
 
 			my_hv_store(tags, "VENDOR", newSVpv(block->data.vorbis_comment.vendor_string.entry, 0));
@@ -174,7 +179,7 @@ void _read_metadata(HV *self, char *path, FLAC__StreamMetadata *block, unsigned 
 
 		case FLAC__METADATA_TYPE_CUESHEET:
 		{
-			AV *cueArray = newAV();;
+			AV *cueArray = newAV();
 
 			/* A lot of this comes from flac/src/share/grabbag/cuesheet.c */
 			const FLAC__StreamMetadata_CueSheet *cs;
@@ -316,7 +321,6 @@ new_XS(class, path)
         }
 
 	{
-
 		FLAC__Metadata_Iterator *iterator = FLAC__metadata_iterator_new();
 		FLAC__StreamMetadata *block;
 		FLAC__bool ok = true;
@@ -369,7 +373,41 @@ new_XS(class, path)
 			XSRETURN_UNDEF;
 		}
 
-		if (memcmp(buf, "fLaC", 4)) {
+		if (memcmp(buf, ID3HEADERFLAG, 3) == 0) {
+
+			unsigned id3size = 0;
+			int c = 0;
+
+			/* How big is the ID3 header? Skip the next two bytes */
+			if (PerlIO_read(FH, &buf, 2) == -1) {
+				warn("Couldn't read ID3 header length!\n");
+				XSRETURN_UNDEF;
+			}
+
+			/* The size of the ID3 tag is a 'synchsafe' 4-byte uint */
+			for (c = 0; c < 4; c++) {
+
+				if (PerlIO_read(FH, &buf, 1) == -1 || buf[0] & 0x80) {
+					warn("Couldn't read ID3 header length (syncsafe)!\n");
+					XSRETURN_UNDEF;
+				}
+
+				id3size <<= 7;
+				id3size |= (buf[0] & 0x7f);
+			}
+
+			if (PerlIO_seek(FH, id3size, SEEK_CUR) < 0) {
+				warn("Couldn't seek past ID3 header!\n");
+				XSRETURN_UNDEF;
+			}
+
+			if (PerlIO_read(FH, &buf, 4) == -1) {
+				warn("Couldn't read magic fLaC header!\n");
+				XSRETURN_UNDEF;
+			}
+		}
+
+		if (memcmp(buf, FLACHEADERFLAG, 4)) {
 			warn("Couldn't read magic fLaC header - got gibberish instead!\n");
 			XSRETURN_UNDEF;
 		}
