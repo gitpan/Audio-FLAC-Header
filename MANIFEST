@@ -3,7 +3,9 @@ Makefile.PL
 MANIFEST
 README
 data/test.flac
-t/Audio-FLAC.t
+data/appId.flac
+t/basic.t
+t/application-id.t
 Header.pm
 Header.xs
 META.yml                                Module meta-data (added by MakeMaker)

@@ -1,12 +1,12 @@
 package Audio::FLAC::Header;
 
-# $Id: Header.pm,v 1.8 2004/09/29 07:18:44 daniel Exp $
+# $Id: Header.pm,v 1.9 2004/10/02 20:07:23 daniel Exp $
 
 use strict;
 use vars qw($VERSION);
 use File::Basename;
 
-$VERSION = '1.0';
+$VERSION = '1.1';
 
 # First four bytes of stream are always fLaC
 use constant FLACHEADERFLAG => 'fLaC';

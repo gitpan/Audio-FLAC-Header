@@ -1,5 +1,11 @@
 Revision history for Perl extension Audio::FLAC.
 
+1.1  Fri Oct  1 21:50:33 PDT 2004
+
+        - Fixed application ID parsing in XS code.
+
+	- Added more tests for application ID.
+
 1.0   Tue Sep 28 23:54:53 PDT 2004
 
         - Implemented an XS binding to the metadata interface in libFLAC,

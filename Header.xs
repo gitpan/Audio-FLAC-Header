@@ -1,4 +1,4 @@
-/* $Id: Header.xs,v 1.1 2004/09/29 07:18:44 daniel Exp $ */
+/* $Id: Header.xs,v 1.2 2004/10/02 20:07:23 daniel Exp $ */
 
 /* This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -109,22 +109,25 @@ void _read_metadata(HV *self, char *path, FLAC__StreamMetadata *block, unsigned 
 
 		case FLAC__METADATA_TYPE_APPLICATION:
 		{
-			/* Initialize an empty SV, and then append to it */
-			SV *appId = newSVpv("", 8);
-			HV *app   = newHV();
-
 			if (block->data.application.id[0]) {
 
-				for (i = 0; i < 4; i++) {
-					sv_catpvf(appId, "%02x", block->data.application.id[i]);
-				}
-			}
+				HV *app   = newHV();
+				SV *tmpId = newSVpvf("%02x", (unsigned)block->data.application.id[0], 8);
+				SV *appId;
 
-			if (block->data.application.data != 0) {
-				my_hv_store(app, (char*)appId, newSVpv(block->data.application.data, 0));
-			}
+				for (i = 1; i < 4; i++) {
+					sv_catpvf(tmpId, "%02x", (unsigned)block->data.application.id[i]);
+				}
+
+				/* Be compatible with the pure perl version */
+				appId = newSVpvf("%ld", strtol(SvPV_nolen(tmpId), NULL, 16));
+
+				if (block->data.application.data != 0) {
+					my_hv_store(app, SvPV_nolen(appId), newSVpv(block->data.application.data, 0));
+				}
 			
-			my_hv_store(self, "application",  newRV_noinc((SV*) app));
+				my_hv_store(self, "application",  newRV_noinc((SV*) app));
+			}
 
 			break;
 		}
@@ -217,11 +220,7 @@ void _read_metadata(HV *self, char *path, FLAC__StreamMetadata *block, unsigned 
 						sv_catpvf(indexSV, "%02u:%02u:%02u\n", m, s, f);
 
 					} else {
-#ifdef _MSC_VER
-						sv_catpvf(indexSV, "%I64u\n", track->offset + index->offset);
-#else
-						sv_catpvf(indexSV, "%llu\n", track->offset + index->offset);
-#endif
+						sv_catpvf(indexSV, "%"UVuf"\n", track->offset + index->offset);
 					}
 
 
@@ -229,13 +228,10 @@ void _read_metadata(HV *self, char *path, FLAC__StreamMetadata *block, unsigned 
 				}
 			}
 
-#ifdef _MSC_VER
-			av_push(cueArray, newSVpvf("REM FLAC__lead-in %I64u\n", cs->lead_in));
-			av_push(cueArray, newSVpvf("REM FLAC__lead-out %u %I64u\n", (unsigned)cs->tracks[track_num].number, cs->tracks[track_num].offset));
-#else
-			av_push(cueArray, newSVpvf("REM FLAC__lead-in %llu\n", cs->lead_in));
-			av_push(cueArray, newSVpvf("REM FLAC__lead-out %u %llu\n", (unsigned)cs->tracks[track_num].number, cs->tracks[track_num].offset));
-#endif
+			av_push(cueArray, newSVpvf("REM FLAC__lead-in %"UVuf"\n", cs->lead_in));
+			av_push(cueArray, newSVpvf("REM FLAC__lead-out %u %"UVuf"\n", 
+				(unsigned)cs->tracks[track_num].number, cs->tracks[track_num].offset)
+			);
 
 			my_hv_store(self, "cuesheet",  newRV_noinc((SV*) cueArray));
 
