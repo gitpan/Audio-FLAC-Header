@@ -8,6 +8,7 @@ data/appId.flac
 t/basic.t
 t/pod.t
 t/application-id.t
+t/id3tagged.t
 Header.pm
 Header.xs
 META.yml                                Module meta-data (added by MakeMaker)

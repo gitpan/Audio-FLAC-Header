@@ -33,6 +33,10 @@
 #define FLACHEADERFLAG "fLaC"
 #define ID3HEADERFLAG  "ID3"
 
+#ifdef _MSC_VER
+# define stat _stat
+#endif
+
 /* strlen the length automatically */
 #define my_hv_store(a,b,c)   hv_store(a,b,strlen(b),c,0)
 #define my_hv_fetch(a,b)     hv_fetch(a,b,strlen(b),0)
@@ -48,7 +52,8 @@ void _cuesheet_frame_to_msf(unsigned frame, unsigned *minutes, unsigned *seconds
 
 void _read_metadata(HV *self, char *path, FLAC__StreamMetadata *block, unsigned block_number) {
 
-	unsigned i, j;
+	unsigned i;
+	int j;
 
 	switch (block->type) {
 
@@ -89,11 +94,11 @@ void _read_metadata(HV *self, char *path, FLAC__StreamMetadata *block, unsigned 
 			totalSeconds = block->data.stream_info.total_samples / (float)block->data.stream_info.sample_rate;
 
 			if (totalSeconds <= 0) {
-				warn(sprintf("File: %s - %s\n%s\n",
+				warn("File: %s - %s\n%s\n",
 					path,
 					"totalSeconds is 0 - we couldn't find either TOTALSAMPLES or SAMPLERATE!",
 					"setting totalSeconds to 1 to avoid divide by zero error!"
-				));
+				);
 
 				totalSeconds = 1;
 			}
