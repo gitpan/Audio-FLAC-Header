@@ -1,0 +1,9 @@
+Changes
+Makefile.PL
+MANIFEST
+README
+data/test.flac
+t/Audio-FLAC.t
+Header.pm
+Header.xs
+META.yml                                Module meta-data (added by MakeMaker)

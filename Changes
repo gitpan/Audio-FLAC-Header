@@ -1,0 +1,33 @@
+Revision history for Perl extension Audio::FLAC.
+
+1.0   Tue Sep 28 23:54:53 PDT 2004
+
+        - Implemented an XS binding to the metadata interface in libFLAC,
+          resulting in a much faster parser.
+
+	- Try to use the XS code first, but fall back to Pure Perl.
+
+0.8   Sat Jul 10 15:03:52 PDT 2004
+
+        - Add application block parsing from Michael Turner.
+
+0.7   Thu Jan 29 08:44:20 PST 2004
+
+        - Added more debug info when we can't get data.
+
+        - Fixed some bugs from Jason Holtzapple.
+
+0.6   Mon Jan 26 20:10:26 PST 2004
+
+	- Added cuesheet parsing from Michael.
+
+	- Continue if there is no vorbis comment, which is valid.
+
+0.5   Mon Dec 15 08:28:12 2003
+
+	- Add ID3 skipping code, return hashrefs, writeTag code.
+
+0.01  Tue Nov 25 16:07:46 2003
+	- original version; created by h2xs 1.23 with options
+		-A -X -b 5.5.3 -c -n Audio::FLAC --skip-warnings
+
