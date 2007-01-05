@@ -1,4 +1,4 @@
-/* $Id: Header.xs,v 1.4 2005/02/16 22:01:37 daniel Exp $ */
+/* $Id: Header.xs 360 2005-11-26 08:02:13Z dsully $ */
 
 /* This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -54,6 +54,9 @@ void _read_metadata(HV *self, char *path, FLAC__StreamMetadata *block, unsigned 
 
 	unsigned i;
 	int j;
+	int storePicture = 0;
+
+	HV *pictureContainer = newHV();
 
 	switch (block->type) {
 
@@ -133,7 +136,7 @@ void _read_metadata(HV *self, char *path, FLAC__StreamMetadata *block, unsigned 
 				appId = newSVpvf("%ld", strtol(SvPV_nolen(tmpId), NULL, 16));
 
 				if (block->data.application.data != 0) {
-					my_hv_store(app, SvPV_nolen(appId), newSVpv(block->data.application.data, 0));
+					my_hv_store(app, SvPV_nolen(appId), newSVpv((char*)block->data.application.data, 0));
 				}
 			
 				my_hv_store(self, "application",  newRV_noinc((SV*) app));
@@ -149,12 +152,18 @@ void _read_metadata(HV *self, char *path, FLAC__StreamMetadata *block, unsigned 
 			AV   *rawTagArray = newAV();
 			HV   *tags = newHV();
 
-			my_hv_store(tags, "VENDOR", newSVpv(block->data.vorbis_comment.vendor_string.entry, 0));
+			my_hv_store(tags, "VENDOR", newSVpv((char*)block->data.vorbis_comment.vendor_string.entry, 0));
 
 			for (i = 0; i < block->data.vorbis_comment.num_comments; i++) {
 
+				if (!block->data.vorbis_comment.comments[i].entry ||
+					!block->data.vorbis_comment.comments[i].length){
+					warn("Empty comment, skipping...\n");
+					continue;				
+				}
+
 				char *entry = SvPV_nolen(newSVpv(
-					block->data.vorbis_comment.comments[i].entry,
+					(char*)block->data.vorbis_comment.comments[i].entry,
 					block->data.vorbis_comment.comments[i].length
 				));
 
@@ -248,9 +257,40 @@ void _read_metadata(HV *self, char *path, FLAC__StreamMetadata *block, unsigned 
 			break;
 		}
 
+/* The PICTURE metadata block came about in FLAC 1.1.3 */
+#ifdef FLAC_API_VERSION_CURRENT
+		case FLAC__METADATA_TYPE_PICTURE:
+		{
+			HV *picture = newHV();
+
+			my_hv_store(picture, "mimeType", newSVpv(block->data.picture.mime_type, 0));
+			my_hv_store(picture, "description", newSVpv(block->data.picture.description, 0));
+			my_hv_store(picture, "width", newSViv(block->data.picture.width));
+			my_hv_store(picture, "height", newSViv(block->data.picture.height));
+			my_hv_store(picture, "depth", newSViv(block->data.picture.depth));
+			my_hv_store(picture, "colorIndex", newSViv(block->data.picture.colors));
+			my_hv_store(picture, "imageData", newSVpv(block->data.picture.data, block->data.picture.data_length));
+
+			my_hv_store(
+				pictureContainer,
+				SvPV_nolen(newSViv(block->data.picture.type)),
+				newRV_noinc((SV*) picture)
+			);
+
+			storePicture = 1;
+
+			break;
+		}
+#endif
+
 		/* XXX- Just ignore for now */
 		default:
 			break;
+	}
+
+	if (storePicture && hv_scalar(pictureContainer)) {
+
+		my_hv_store(self, "picture", newRV_noinc((SV*) pictureContainer));
 	}
 }
 
@@ -327,7 +367,7 @@ new_XS(class, path)
 
 	{
 		FLAC__Metadata_Iterator *iterator = FLAC__metadata_iterator_new();
-		FLAC__StreamMetadata *block;
+		FLAC__StreamMetadata *block = 0;
 		FLAC__bool ok = true;
 		unsigned block_number = 0;
 
@@ -358,6 +398,12 @@ new_XS(class, path)
 	}
 
 	FLAC__metadata_chain_delete(chain);
+
+	/* Make sure tags is an empty HV if there were no VCs in the file */ 
+	if (!hv_exists(self, "tags", 4)) {
+
+		my_hv_store(self, "tags", newRV_noinc((SV*) newHV()));
+	}
 
 	/* Find the offset of the start pos for audio blocks (ie: after metadata) */
 	{
@@ -450,11 +496,172 @@ new_XS(class, path)
 	}
 
 	my_hv_store(self, "filename", newSVpv(path, 0));
+	my_hv_store(self, "vendor", newSVpv((char*)FLAC__VENDOR_STRING, 0));
 
 	/* Bless the hashref to create a class object */
 	sv_bless(obj_ref, gv_stashpv(class, FALSE));
 
 	RETVAL = obj_ref;
+
+	OUTPUT:
+	RETVAL
+
+SV*
+write_XS(obj)
+	SV* obj
+
+	CODE:
+
+	FLAC__bool ok = true;
+	FLAC__bool needs_write = false;
+
+	HE *he;
+	HV *self = (HV *) SvRV(obj);
+	HV *tags = (HV *) SvRV(*(my_hv_fetch(self, "tags")));
+
+	char *path = (char *) SvPV_nolen(*(my_hv_fetch(self, "filename")));
+
+	FLAC__Metadata_Chain *chain = FLAC__metadata_chain_new();
+
+        if (chain == 0) {
+                die("Out of memory allocating chain");
+		XSRETURN_UNDEF;
+	}
+
+	if (!FLAC__metadata_chain_read(chain, path)) {
+                print_error_with_chain_status(chain, "%s: ERROR: reading metadata", path);
+		XSRETURN_UNDEF;
+        }
+
+	{
+		FLAC__Metadata_Iterator *iterator = FLAC__metadata_iterator_new();
+		FLAC__StreamMetadata *block = 0;
+		FLAC__bool found_vc_block = false;
+
+		if (iterator == 0) {
+			die("out of memory allocating iterator");
+		}
+
+        	FLAC__metadata_iterator_init(iterator, chain);
+
+		do {
+			block = FLAC__metadata_iterator_get_block(iterator);
+
+			if (block->type == FLAC__METADATA_TYPE_VORBIS_COMMENT) {
+				found_vc_block = true;
+			}
+
+		} while (!found_vc_block && FLAC__metadata_iterator_next(iterator));
+
+		if (found_vc_block) {
+
+			/* Empty out the existing block */
+			if (0 != block->data.vorbis_comment.comments) {
+
+				FLAC__ASSERT(block->data.vorbis_comment.num_comments > 0);
+
+				if (!FLAC__metadata_object_vorbiscomment_resize_comments(block, 0)) {
+
+					die("%s: ERROR: memory allocation failure\n", path);
+				}
+
+			} else {
+
+				FLAC__ASSERT(block->data.vorbis_comment.num_comments == 0);
+			}
+
+		} else {
+
+                	/* create a new block if necessary */
+                        block = FLAC__metadata_object_new(FLAC__METADATA_TYPE_VORBIS_COMMENT);
+
+                        if (0 == block) {
+                                die("out of memory allocating VORBIS_COMMENT block");
+			}
+
+                        while (FLAC__metadata_iterator_next(iterator));
+
+                        if (!FLAC__metadata_iterator_insert_block_after(iterator, block)) {
+
+                                print_error_with_chain_status(chain, "%s: ERROR: adding new VORBIS_COMMENT block to metadata", path);
+				XSRETURN_UNDEF;
+                        }
+
+                        /* iterator is left pointing to new block */
+                        FLAC__ASSERT(FLAC__metadata_iterator_get_block(iterator) == block);
+		}
+
+		if (hv_iterinit(tags)) {
+
+			/* VENDOR must be first */
+			{
+				FLAC__StreamMetadata_VorbisComment_Entry entry;
+
+				entry.entry  = (FLAC__byte *)form("VENDOR=%s", FLAC__VENDOR_STRING);
+				entry.length = strlen((const char *)entry.entry);
+
+				FLAC__metadata_object_vorbiscomment_append_comment(block, entry, /*copy=*/true);
+			}
+
+			while ((he = hv_iternext(tags))) {
+
+				FLAC__StreamMetadata_VorbisComment_Entry entry;
+
+				char *key = HePV(he, PL_na);
+				char *val = SvPV_nolen(HeVAL(he));
+				char *ent = form("%s=%s", key, val);
+
+				if (strEQ(key, "VENDOR")) {
+					continue;
+				}
+
+				if (ent == NULL) {
+
+					warn("Couldn't create key/value pair!\n");
+					XSRETURN_UNDEF;
+				}
+
+				entry.entry  = (FLAC__byte *)ent;
+				entry.length = strlen((const char *)entry.entry);
+
+				if (!FLAC__format_vorbiscomment_entry_is_legal(entry.entry, entry.length)) {
+
+					warn("%s: ERROR: tag value for '%s' is not valid UTF-8\n", path, ent);
+					XSRETURN_UNDEF;
+				}
+
+				if (!FLAC__metadata_object_vorbiscomment_append_comment(block, entry, /*copy=*/true)) {
+
+					warn("%s: ERROR: memory allocation failure\n", path);
+					XSRETURN_UNDEF;
+				}
+
+				needs_write = true;
+			}
+		}
+
+		FLAC__metadata_iterator_delete(iterator);
+	}
+
+	if (needs_write) {
+
+		FLAC__metadata_chain_sort_padding(chain);
+
+		ok = FLAC__metadata_chain_write(chain, /* padding */true, /*modtime*/ false);
+
+                if (!ok) {
+                        print_error_with_chain_status(chain, "%s: ERROR: writing FLAC file", path);
+			RETVAL = &PL_sv_no;
+		} else {
+			RETVAL = &PL_sv_yes;
+		}
+
+        } else {
+
+		RETVAL = &PL_sv_yes;
+	}
+
+	FLAC__metadata_chain_delete(chain);
 
 	OUTPUT:
 	RETVAL

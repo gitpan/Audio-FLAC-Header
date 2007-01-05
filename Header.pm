@@ -1,29 +1,40 @@
 package Audio::FLAC::Header;
 
-# $Id: Header.pm,v 1.11 2005/02/16 22:01:37 daniel Exp $
+# $Id: Header.pm 10 2007-01-05 03:05:25Z dsully $
 
 use strict;
-use vars qw($VERSION $HAVE_XS);
 use File::Basename;
 
-$VERSION = '1.4';
+our $VERSION = '1.5';
+our $HAVE_XS = 0;
 
 # First four bytes of stream are always fLaC
-use constant FLACHEADERFLAG => 'fLaC';
-use constant ID3HEADERFLAG  => 'ID3';
+my $FLACHEADERFLAG = 'fLaC';
+my $ID3HEADERFLAG  = 'ID3';
 
 # Masks for METADATA_BLOCK_HEADER
-use constant LASTBLOCKFLAG => 0x80000000;
-use constant BLOCKTYPEFLAG => 0x7F000000;
-use constant BLOCKLENFLAG  => 0x00FFFFFF;
+my $LASTBLOCKFLAG = 0x80000000;
+my $BLOCKTYPEFLAG = 0x7F000000;
+my $BLOCKLENFLAG  = 0x00FFFFFF;
 
 # Enumerated Block Types
-use constant BT_STREAMINFO     => 0;
-use constant BT_PADDING        => 1;
-use constant BT_APPLICATION    => 2;
-use constant BT_SEEKTABLE      => 3;
-use constant BT_VORBIS_COMMENT => 4;
-use constant BT_CUESHEET       => 5;
+my $BT_STREAMINFO     = 0;
+my $BT_PADDING        = 1;
+my $BT_APPLICATION    = 2;
+my $BT_SEEKTABLE      = 3;
+my $BT_VORBIS_COMMENT = 4;
+my $BT_CUESHEET       = 5;
+my $BT_PICTURE        = 6;
+
+my %BLOCK_TYPES = (
+	$BT_STREAMINFO     => '_parseStreamInfo',
+	$BT_APPLICATION    => '_parseAppBlock',
+# The seektable isn't actually useful yet, and is a big performance hit. 
+#	$BT_SEEKTABLE      => '_parseSeekTable',
+	$BT_VORBIS_COMMENT => '_parseVorbisComments',
+	$BT_CUESHEET       => '_parseCueSheet',
+	$BT_PICTURE        => '_parsePicture',
+);
 
 XS_BOOT: {
         # If I inherit DynaLoader then I inherit AutoLoader
@@ -37,96 +48,63 @@ XS_BOOT: {
 		do {__PACKAGE__->can('bootstrap') || \&DynaLoader::bootstrap}->(__PACKAGE__, $VERSION);
 
 		return 1;
-
 	};
 
 	# Try to use the faster code first.
-	*new = $HAVE_XS ? \&new_XS : \&new_PP;
+	if ($HAVE_XS) {
+		*new   = \&new_XS;
+		*write = \&write_XS;
+	} else {
+		*new   = \&new_PP;
+		*write = \&write_PP;
+	}
 }
 
 sub new_PP {
-	my $class = shift;
-	my $file  = shift;
-	my $writeHack = shift;
-	my $errflag = 0;
+	my ($class, $file) = @_;
 
-	my $self  = {};
+	# open up the file
+	open(my $fh, $file) or die "[$file] does not exist or cannot be read: $!";
+
+	# make sure dos-type systems can handle it...
+	binmode($fh);
+
+	my $self  = {
+		'fileSize' => -s $file,
+		'filename' => $file,
+	};
 
 	bless $self, $class;
 
-	# open up the file
-	open(FILE, $file) or do {
-		warn "[$file] does not exist or cannot be read: $!";
-		return $self;
-	};
+	# check the header to make sure this is actually a FLAC file
+	my $byteCount = $self->_checkHeader($fh) || 0;
 
-	# make sure dos-type systems can handle it...
-	binmode FILE;
+	if ($byteCount <= 0) {
 
-	$self->{'fileSize'}   = -s $file;
-	$self->{'filename'}   = $file;
-	$self->{'fileHandle'} = \*FILE;
-
-	# Initialize FLAC analysis
-	$errflag = $self->_init();
-	if ($errflag < 0) {
-		warn "[$file] does not appear to be a FLAC file!";
-		close FILE;
-		undef $self->{'fileHandle'};
-		return $self;
-	};
-
-	# Grab the metadata blocks from the FLAC file
-	$errflag = $self->_getMetadataBlocks();
-	if ($errflag < 0) {
-		warn "[$file] Unable to read metadata from FLAC!";
-		close FILE;
-		undef $self->{'fileHandle'};
-		return $self;
-	};
-
-	# This is because we don't write out tags in XS yet.
-	unless ($writeHack) {
-
-		# Parse streaminfo
-		$errflag = $self->_parseStreaminfo();
-		if ($errflag < 0) {
-			warn "[$file] Can't find streaminfo metadata block!";
-			close FILE;
-			undef $self->{'fileHandle'};
-			return $self;
-		};
-
-		# Parse vorbis tags
-		$errflag = $self->_parseVorbisComments();
-		if ($errflag < 0) {
-			warn "[$file] Can't find/parse vorbis comment metadata block!";
-			close FILE;
-			undef $self->{'fileHandle'};
-			return $self;
-		};
-
-		# Parse cuesheet
-		$errflag = $self->_parseCueSheet();
-		if ($errflag < 0) {
-			warn "[$file] Problem parsing cuesheet metadata block!";
-			close FILE;
-			undef $self->{'fileHandle'};
-			return $self;
-		};
-
-		# Parse third-party application metadata block
-		$errflag = $self->_parseAppBlock();
-		if ($errflag < 0) {
-			warn "[$file] Problem parsing application metadata block!";
-			close FILE;
-			undef $self->{'fileHandle'};
-			return $self;
-		};
+		close($fh);
+		die "[$file] does not appear to be a FLAC file!";
 	}
 
-	close FILE;
-	undef $self->{'fileHandle'};
+	$self->{'startMetadataBlocks'} = $byteCount;
+
+	# Grab the metadata blocks from the FLAC file
+	if (!$self->_getMetadataBlocks($fh)) {
+
+		close($fh);
+		die "[$file] Unable to read metadata from FLAC!";
+	};
+
+	# Always set to empty hash in the case of no comments.
+	$self->{'tags'} = {};
+
+	for my $block (@{$self->{'metadataBlocks'}}) {
+
+		my $method = $BLOCK_TYPES{ $block->{'blockType'} } || next;
+
+		$self->$method($block);
+	}
+
+	close($fh);
 
 	return $self;
 }
@@ -163,6 +141,16 @@ sub cuesheet {
 	return [];
 }
 
+sub seektable {
+	my $self = shift;
+
+	# if the seekpoint table block exists, return it as an arrayref
+	return $self->{'seektable'} if exists($self->{'seektable'});
+
+	# otherwise, return an empty arrayref
+	return [];
+}
+
 sub application {
 	my $self = shift;
 	my $appID = shift || "default";
@@ -174,35 +162,36 @@ sub application {
 	return undef;
 }
 
-sub write {
+sub picture {
+	my $self = shift;
+	my $type = shift || 3; # front cover
+
+	# if the picture block exists, return it's content
+	return $self->{'picture'}->{$type} if exists($self->{'picture'}->{$type});
+
+	# otherwise, return nothing
+	return undef;
+}
+
+sub vendor_string {
 	my $self = shift;
 
-	# XXX - this is a hack until I do metadata writing in XS
-	# Very ugly, I know.
-	if ($HAVE_XS) {
+	return $self->{'vendor'} || "Audio::FLAC::Header $VERSION";
+}
 
-		# Make a copy of these - otherwise we'll refcnt++
-		my %tags = %{$self->{'tags'}};
-		my %info = %{$self->{'info'}};
-
-		my $filename = $self->{'filename'};
-		my $class    = ref($self);
-
-		undef $self;
-
-		$self = $class->new_PP($filename, 1);
-
-		$self->{'tags'} = \%tags;
-		$self->{'info'} = \%info;
-	}
+sub write_PP {
+	my $self = shift;
 
 	my @tagString = ();
 	my $numTags   = 0;
 
 	my ($idxVorbis,$idxPadding);
 	my $totalAvail = 0;
-	my $metadataBlocks = FLACHEADERFLAG;
+	my $metadataBlocks = $FLACHEADERFLAG;
 	my $tmpnum;
+
+	use Data::Dump;
+	Data::Dump::dump($self->{'tags'});
 
 	# Make a list of the tags and lengths for packing into the vorbis metadata block
 	foreach (keys %{$self->{'tags'}}) {
@@ -229,8 +218,8 @@ sub write {
 
 	# Is there enough space for this new header?
 	# Determine the length of the old comment block and the length of the padding available
-	$idxVorbis  = $self->_findMetadataIndex(BT_VORBIS_COMMENT);
-	$idxPadding = $self->_findMetadataIndex(BT_PADDING);
+	$idxVorbis  = $self->_findMetadataIndex($BT_VORBIS_COMMENT);
+	$idxPadding = $self->_findMetadataIndex($BT_PADDING);
 
 	if ($idxVorbis >= 0) {
 		# Add the length of the block
@@ -252,7 +241,7 @@ sub write {
 	# re-writing entire file (not within scope)
 	if ($totalAvail - length($vorbisComment) < 0) {
 		warn "Unable to write Vorbis tags - not enough header space!";
-		return -1;
+		return 0;
 	}
 
 	# Modify the metadata blocks to reflect new header sizes
@@ -260,7 +249,7 @@ sub write {
 	# Is there a Vorbis metadata block?
 	if ($idxVorbis < 0) {
 		# no vorbis block, so add one
-		_addNewMetadataBlock($self, BT_VORBIS_COMMENT, $vorbisComment);
+		_addNewMetadataBlock($self, $BT_VORBIS_COMMENT, $vorbisComment);
 	} else {
 		# update the vorbis block
 		_updateMetadataBlock($self, $idxVorbis       , $vorbisComment);
@@ -270,7 +259,7 @@ sub write {
 	# Change the padding to reflect the new vorbis comment size
 	if ($idxPadding < 0) {
 		# no padding block
-		_addNewMetadataBlock($self, BT_PADDING , "\0" x ($totalAvail - length($vorbisComment)));
+		_addNewMetadataBlock($self, $BT_PADDING , "\0" x ($totalAvail - length($vorbisComment)));
 	} else {
 		# update the padding block
 		_updateMetadataBlock($self, $idxPadding, "\0" x ($totalAvail - length($vorbisComment)));
@@ -286,63 +275,39 @@ sub write {
 	}
 
 	# open FLAC file and write new metadata blocks
-	open FLACFILE, "+<$self->{'filename'}" or return -1;
+	open FLACFILE, "+<$self->{'filename'}" or return 0;
 	binmode FLACFILE;
 
 	# overwrite the existing metadata blocks
-	print FLACFILE $metadataBlocks or return -1;
+	print FLACFILE $metadataBlocks or return 0;
 
 	close FLACFILE;
 
-	return 0;
+	return 1;
 }
 
 # private methods to this class
-sub _init {
-	my $self = shift;
-
-	my $fh	 = $self->{'fileHandle'};
-
-	# check the header to make sure this is actually a FLAC file
-	my $byteCount = $self->_checkHeader() || 0;
-
-	unless ($byteCount > 0) {
-		# if it's not, we can't do anything
-		return -1;
-	}
-
-	$self->{'startMetadataBlocks'} = $byteCount;
-
-	return 0;
-}
-
 sub _checkHeader {
-	my $self = shift;
-
-	my $fh	 = $self->{'fileHandle'};
-	my $id3size = '';
-
-	# stores how far into the file we've read,
-	# so later reads into the file can skip right
-	# past all of the header stuff
-	my $byteCount = 0;
+	my ($self, $fh) = @_;
 
 	# check that the first four bytes are 'fLaC'
 	read($fh, my $buffer, 4) or return -1;
 
-	if (substr($buffer,0,3) eq ID3HEADERFLAG) {
+	if (substr($buffer,0,3) eq $ID3HEADERFLAG) {
 
 		$self->{'ID3V2Tag'} = 1;
 
+		my $id3size = '';
+
 		# How big is the ID3 header?
-		# Skip the next two bytes
+		# Skip the next two bytes - major & minor version number.
 		read($fh, $buffer, 2) or return -1;
 
 		# The size of the ID3 tag is a 'synchsafe' 4-byte uint
 		# Read the next 4 bytes one at a time, unpack each one B7,
 		# and concatenate.  When complete, do a bin2dec to determine size
 		for (my $c = 0; $c < 4; $c++) {
-			read ($fh, $buffer, 1) or return -1;
+			read($fh, $buffer, 1) or return -1;
 			$id3size .= substr(unpack ("B8", $buffer), 1);
 		}
 
@@ -350,21 +315,17 @@ sub _checkHeader {
 		read($fh, $buffer, 4) or return -1;
 	}
 
-	if ($buffer ne FLACHEADERFLAG) {
+	if ($buffer ne $FLACHEADERFLAG) {
 		warn "Unable to identify $self->{'filename'} as a FLAC bitstream!\n";
 		return -2;
 	}
 
-	$byteCount = tell($fh);
-
 	# at this point, we assume the bitstream is valid
-	return $byteCount;
+	return tell($fh);
 }
 
 sub _getMetadataBlocks {
-	my $self = shift;
-
-	my $fh   = $self->{'fileHandle'};
+	my ($self, $fh) = @_;
 
 	my $metadataBlockList = [];
 	my $numBlocks         = 0;
@@ -375,20 +336,20 @@ sub _getMetadataBlocks {
 	while ($lastBlockFlag == 0) {
 
 		# Read the next metadata_block_header
-		read $fh, $buffer, 4 or return -1;
+		read($fh, $buffer, 4) or return 0;
 
-		my $metadataBlockHeader = unpack ('N', $buffer);
+		my $metadataBlockHeader = unpack('N', $buffer);
 
 		# Break out the contents of the metadata_block_header
-		my $metadataBlockType   = (BLOCKTYPEFLAG & $metadataBlockHeader)>>24;
-		my $metadataBlockLength = (BLOCKLENFLAG  & $metadataBlockHeader);
-		   $lastBlockFlag       = (LASTBLOCKFLAG & $metadataBlockHeader)>>31;
+		my $metadataBlockType   = ($BLOCKTYPEFLAG & $metadataBlockHeader)>>24;
+		my $metadataBlockLength = ($BLOCKLENFLAG  & $metadataBlockHeader);
+		   $lastBlockFlag       = ($LASTBLOCKFLAG & $metadataBlockHeader)>>31;
 
 		# If the block size is zero go to the next block 
 		next unless $metadataBlockLength;
 
 		# Read the contents of the metadata_block
-		read $fh, my $metadataBlockData, $metadataBlockLength or return -1;
+		read($fh, my $metadataBlockData, $metadataBlockLength) or return 0;
 
 		# Store the parts in the list
 		$metadataBlockList->[$numBlocks++] = {
@@ -403,44 +364,43 @@ sub _getMetadataBlocks {
 	$self->{'metadataBlocks'} = $metadataBlockList;
 	$self->{'startAudioData'} = tell $fh;
 
-	return 0;
+	return 1;
 }
 
-sub _parseStreaminfo {
-	my $self = shift;
+sub _parseStreamInfo {
+	my ($self, $block) = @_;
+
 	my $info = {};
-	my ($totalSeconds,$trackMinutes,$trackSeconds,$trackFrames,$bitRate);
-
-	my $idx = $self->_findMetadataIndex(BT_STREAMINFO);
-
-	if ($idx < 0) {
-		return -1;
-	}
 
 	# Convert to binary string, since there's some unfriendly lengths ahead
-	my $metaBinString = unpack('B144', $self->{'metadataBlocks'}[$idx]->{'contents'});
+	my $metaBinString = unpack('B144', $block->{'contents'});
 
-	$info->{'MINIMUMBLOCKSIZE'} = _bin2dec(substr($metaBinString, 0,16));
-	$info->{'MAXIMUMBLOCKSIZE'} = _bin2dec(substr($metaBinString,16,32));
-	$info->{'MINIMUMFRAMESIZE'} = _bin2dec(substr($metaBinString,32,24));
-	$info->{'MAXIMUMFRAMESIZE'} = _bin2dec(substr($metaBinString,56,24));
+	my $x32 = 0 x 32;
 
-	$info->{'SAMPLERATE'}       = _bin2dec(substr($metaBinString,80,20));
-	$info->{'NUMCHANNELS'}      = _bin2dec(substr($metaBinString,100,3)) + 1;
-	$info->{'BITSPERSAMPLE'}    = _bin2dec(substr($metaBinString,103,5)) + 1;
+	$info->{'MINIMUMBLOCKSIZE'} = unpack('N', pack('B32', substr($x32 . substr($metaBinString, 0, 16), -32)));
+	$info->{'MAXIMUMBLOCKSIZE'} = unpack('N', pack('B32', substr($x32 . substr($metaBinString, 16, 32), -32)));
+	$info->{'MINIMUMFRAMESIZE'} = unpack('N', pack('B32', substr($x32 . substr($metaBinString, 32, 24), -32)));
+	$info->{'MINIMUMFRAMESIZE'} = unpack('N', pack('B32', substr($x32 . substr($metaBinString, 56, 24), -32)));
+
+	$info->{'SAMPLERATE'}       = unpack('N', pack('B32', substr($x32 . substr($metaBinString, 80, 20), -32)));
+	$info->{'NUMCHANNELS'}      = unpack('N', pack('B32', substr($x32 . substr($metaBinString, 100, 3), -32))) + 1;
+	$info->{'BITSPERSAMPLE'}    = unpack('N', pack('B32', substr($x32 . substr($metaBinString, 100, 5), -32))) + 1;
 
 	# Calculate total samples in two parts
-	my $highBits = _bin2dec(substr($metaBinString,108,4));
-	$info->{'TOTALSAMPLES'} = $highBits * 2 ** 32 + _bin2dec(substr($metaBinString,112,32));
+	my $highBits = unpack('N', pack('B32', substr($x32 . substr($metaBinString, 108, 4), -32)));
+
+	$info->{'TOTALSAMPLES'} = $highBits * 2 ** 32 + 
+		unpack('N', pack('B32', substr($x32 . substr($metaBinString, 112, 32), -32)));
 
 	# Return the MD5 as a 32-character hexadecimal string
-	$info->{'MD5CHECKSUM'} = unpack('H32',substr($self->{'metadataBlocks'}[$idx]->{'contents'},18,16));
+	#$info->{'MD5CHECKSUM'} = unpack('H32',substr($self->{'metadataBlocks'}[$idx]->{'contents'},18,16));
+	$info->{'MD5CHECKSUM'} = unpack('H32',substr($block->{'contents'}, 18, 16));
 
 	# Store in the data hash
 	$self->{'info'} = $info;
 
 	# Calculate the track times
-	$totalSeconds = $info->{'TOTALSAMPLES'} / $info->{'SAMPLERATE'};
+	my $totalSeconds = $info->{'TOTALSAMPLES'} / $info->{'SAMPLERATE'};
 
 	if ($totalSeconds == 0) {
 		warn "totalSeconds is 0 - we couldn't find either TOTALSAMPLES or SAMPLERATE!\n" .
@@ -456,73 +416,82 @@ sub _parseStreaminfo {
 	$self->{'trackLengthFrames'}  = ($totalSeconds - int($totalSeconds)) * 75;
 	$self->{'bitRate'}            = 8 * ($self->{'fileSize'} - $self->{'startAudioData'}) / $totalSeconds;
 
-	return 0;
+	return 1;
 }
 
 sub _parseVorbisComments {
-	my $self = shift;
-	my $tags = {};
-	my $rawTags = [];
-	my $idx  = $self->_findMetadataIndex(BT_VORBIS_COMMENT);
+	my ($self, $block) = @_;
 
-	# continue parsing, even if we can't find the comment.
-	return 0 if $idx < 0;
+	my $tags    = {};
+	my $rawTags = [];
 
 	# Parse out the tags from the metadata block
-	my $tmpBlock         = $self->{'metadataBlocks'}[$idx]->{'contents'};
+	my $tmpBlock = $block->{'contents'};
+	my $offset   = 0;
 
 	# First tag in block is the Vendor String
-	my $tagLen        = _grabInt32(\$tmpBlock);
-	$tags->{'VENDOR'} = substr($tmpBlock,0,$tagLen);
-	$tmpBlock         = substr($tmpBlock,$tagLen);
+	my $tagLen = unpack('V', substr($tmpBlock, $offset, 4));
+	$tags->{'VENDOR'} = substr($tmpBlock, ($offset += 4), $tagLen);
 
 	# Now, how many additional tags are there?
-	my $numTags       = _grabInt32(\$tmpBlock);
+	my $numTags = unpack('V', substr($tmpBlock, ($offset += $tagLen), 4));
+
+	$offset += 4;
 
 	for (my $tagi = 0; $tagi < $numTags; $tagi++) {
 
 		# Read the tag string
-		$tagLen    = _grabInt32(\$tmpBlock);
-		my $tagStr = substr($tmpBlock,0,$tagLen);
-		$tmpBlock  = substr($tmpBlock,$tagLen);
+		my $tagLen = unpack('V', substr($tmpBlock, $offset, 4));
+		my $tagStr = substr($tmpBlock, ($offset += 4), $tagLen);
 
 		# Save the raw tag
 		push(@$rawTags, $tagStr);
 
 		# Match the key and value
-		if ($tagStr =~ /^(.*?)=(.*)$/s) {
+		if ($tagStr =~ /^(.*?)=(.*?)[\r\n]*$/s) {
+
 			# Make the key uppercase
 			my $tkey = $1;
 			$tkey =~ tr/a-z/A-Z/;
 
-			# Stick it in the tag hash
-			$tags->{$tkey} = $2;
+			# Stick it in the tag hash - and handle multiple tags
+			# of the same name.
+			if (exists $tags->{$tkey} && ref($tags->{$tkey}) ne 'ARRAY') {
+
+				my $oldValue = $tags->{$tkey};
+
+				$tags->{$tkey} = [ $oldValue, $2 ];
+
+			} elsif (ref($tags->{$tkey}) eq 'ARRAY') {
+
+				push @{$tags->{$tkey}}, $2;
+
+			} else {
+
+				$tags->{$tkey} = $2;
+			}
 		}
+
+		$offset += $tagLen;
 	}
 
 	$self->{'tags'} = $tags;
 	$self->{'rawTags'} = $rawTags;
 
-	return 0;
+	return 1;
 }
 
 sub _parseCueSheet {
-	my $self = shift;
-
-	my $idx  = $self->_findMetadataIndex(BT_CUESHEET);
-
-        # No cuesheet block found. 
-        # Not really an error, but no need to continue.
-	return 0 if $idx < 0;
+	my ($self, $block) = @_;
 
 	my $cuesheet = [];
 
 	# Parse out the tags from the metadata block
-	my $tmpBlock  = $self->{'metadataBlocks'}[$idx]->{'contents'};
+	my $tmpBlock = $block->{'contents'};
 
 	# First field in block is the Media Catalog Number
 	my $catalog   = substr($tmpBlock,0,128);
-	$catalog =~ s/\x00*$//; # trim nulls off of the end
+	$catalog =~ s/\x00+.*$//gs; # trim nulls off of the end
 
 	push (@$cuesheet, "CATALOG $catalog\n") if length($catalog) > 0;
 	$tmpBlock     = substr($tmpBlock,128);
@@ -607,7 +576,7 @@ sub _parseCueSheet {
 		$seenTracknumber{$tracknum} = 1;
 
 		my $isrc = substr($tmpBlock,9,12);
-		   $isrc =~ s/\x00*$//;
+		   $isrc =~ s/\x00+.*$//;
 
 		if ((length($isrc) != 0) && (length($isrc) != 12)) {
 			warn "Invalid ISRC code $isrc\n";
@@ -699,28 +668,91 @@ sub _parseCueSheet {
 
 	$self->{'cuesheet'} = $cuesheet;
 
-	return 0;
+	return 1;
+}
+
+sub _parsePicture {
+	my ($self, $block) = @_;
+
+	# Parse out the tags from the metadata block
+	my $tmpBlock  = $block->{'contents'};
+	my $offset    = 0;
+
+	my $pictureType   = unpack('N', substr($tmpBlock, $offset, 4));
+	my $mimeLength    = unpack('N', substr($tmpBlock, ($offset += 4), 4));
+	my $mimeType      = substr($tmpBlock, ($offset += 4), $mimeLength);
+	my $descLength    = unpack('N', substr($tmpBlock, ($offset += $mimeLength), 4));
+	my $description   = substr($tmpBlock, ($offset += 4), $descLength);
+	my $width         = unpack('N', substr($tmpBlock, ($offset += $descLength), 4));
+	my $height        = unpack('N', substr($tmpBlock, ($offset += 4), 4));
+	my $depth         = unpack('N', substr($tmpBlock, ($offset += 4), 4));
+	my $colorIndex    = unpack('N', substr($tmpBlock, ($offset += 4), 4));
+	my $imageLength   = unpack('N', substr($tmpBlock, ($offset += 4), 4));
+	my $imageData     = substr($tmpBlock, ($offset += 4), $imageLength);
+
+	$self->{'picture'}->{$pictureType}->{'mimeType'}    = $mimeType;
+	$self->{'picture'}->{$pictureType}->{'description'} = $description;
+	$self->{'picture'}->{$pictureType}->{'width'}       = $width;
+	$self->{'picture'}->{$pictureType}->{'height'}      = $height;
+	$self->{'picture'}->{$pictureType}->{'depth'}       = $depth;
+	$self->{'picture'}->{$pictureType}->{'colorIndex'}  = $colorIndex;
+	$self->{'picture'}->{$pictureType}->{'imageData'}   = $imageData;
+
+	return 1;
+}
+
+sub _parseSeekTable {
+	my ($self, $block) = @_;
+
+	my $seektable = [];
+
+	# grab the seekpoint table
+	my $tmpBlock = $block->{'contents'};
+	my $offset   = 0;
+
+	# parse out the seekpoints
+	while (my $seekpoint = substr($tmpBlock, $offset, 18)) {
+
+		# Sample number of first sample in the target frame
+		my $highbits     = unpack('N', substr($seekpoint,0,4));
+		my $sampleNumber = $highbits * 2 ** 32 + unpack('N', (substr($seekpoint,4,4)));
+
+		# Detect placeholder seekpoint
+		# since the table is sorted, a placeholder means were finished
+		last if ($sampleNumber == (0xFFFFFFFF * 2 ** 32 + 0xFFFFFFFF));
+
+		# Offset (in bytes) from the first byte of the first frame header 
+		# to the first byte of the target frame's header.
+		$highbits = unpack('N', substr($seekpoint,8,4));
+		my $streamOffset = $highbits * 2 ** 32 + unpack('N', (substr($seekpoint,12,4)));
+
+		# Number of samples in the target frame
+		my $frameSamples = unpack('n', (substr($seekpoint,16,2)));
+
+		# add this point to our copy of the table
+		push (@$seektable, {
+			'sampleNumber' => $sampleNumber, 
+			'streamOffset' => $streamOffset,
+			'frameSamples' => $frameSamples,
+		});
+
+		$offset += 18;
+	}
+
+	$self->{'seektable'} = $seektable;
+
+	return 1;
 }
 
 sub _parseAppBlock {
-	my $self = shift;
+	my ($self, $block) = @_;
 
-	# there may be multiple application blocks with different ids
-	# so we need to loop through them all.
-	my $idx = $self->_findMetadataIndex(BT_APPLICATION);
-	while ($idx >= 0) {
-		my $appContent = [];
+	# Parse out the tags from the metadata block
+	my $appID = unpack('N', substr($block->{'contents'}, 0, 4, ''));
 
-		# Parse out the tags from the metadata block
-		my $tmpBlock  = $self->{'metadataBlocks'}[$idx]->{'contents'};
+	$self->{'application'}->{$appID} = $block->{'contents'};
 
-		# Find the application id
-		my $appID   = unpack('N', substr($tmpBlock,0,4));
-	
-		$self->{'application'}->{$appID} = substr($tmpBlock,4);
-		$idx  = $self->_findMetadataIndex(BT_APPLICATION, ++$idx);
-	}
-	return 0;
+	return 1;
 }
 
 # Take an offset as number of flac samples
@@ -758,17 +790,9 @@ sub _bin2dec {
 	return unpack ('N', pack ('B32', substr(0 x 32 . shift, -32)));
 }
 
-sub _grabInt32 {
-	# Pulls a little-endian unsigned int from a string and returns the remainder
-	my $data  = shift;
-	my $value = unpack('V',substr($$data,0,4));
-	$$data    = substr($$data,4);
-	return $value;
-}
-
 sub _packInt32 {
 	# Packs an integer into a little-endian 32-bit unsigned int
-	return pack('V',shift)
+	return pack('V', shift)
 }
 
 sub _findMetadataIndex {
@@ -780,6 +804,7 @@ sub _findMetadataIndex {
 
 	# Loop through the metadata_blocks until one of $htype is found
 	while ($idx < @{$self->{'metadataBlocks'}}) {
+
 		# Check the type to see if it's a $htype block
 		if ($self->{'metadataBlocks'}[$idx]->{'blockType'} == $htype) {
 			$found++;
@@ -946,9 +971,11 @@ Dan Sully, E<lt>daniel@cpan.orgE<gt> for XS code.
 
 =head1 COPYRIGHT
 
-Pure perl code Copyright (c) 2003-2005, Erik Reckase.
+Pure perl code Copyright (c) 2003-2004, Erik Reckase.
 
-XS code Copyright (c) 2004-2005, Dan Sully.
+Pure perl code Copyright (c) 2003-2007, Dan Sully & Slim Devices.
+
+XS code Copyright (c) 2004-2007, Dan Sully & Slim Devices.
 
 This library is free software; you can redistribute it and/or modify
 it under the same terms as Perl itself, either Perl version 5.8.2 or,
