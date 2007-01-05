@@ -1,10 +1,13 @@
-# http://module-build.sourceforge.net/META-spec.html
-#XXXXXXX This is a prototype!!!  It will change in the future!!! XXXXX#
-name:         Audio-FLAC-Header
-version:      1.6
-version_from: Header.pm
-installdirs:  site
-requires:
-
+abstract: interface to FLAC header metadata.
+author: 'Dan Sully, <daniel@cpan.org>'
 distribution_type: module
-generated_by: ExtUtils::MakeMaker version 6.30_01
+generated_by: Module::Install version 0.64
+license: perl
+name: Audio-FLAC-Header
+no_index:
+  directory:
+    - inc
+    - t
+requires:
+  perl: 5.005
+version: 1.7
