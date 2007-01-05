@@ -1,11 +1,11 @@
 package Audio::FLAC::Header;
 
-# $Id: Header.pm 10 2007-01-05 03:05:25Z dsully $
+# $Id: Header.pm 12 2007-01-05 03:10:38Z dsully $
 
 use strict;
 use File::Basename;
 
-our $VERSION = '1.5';
+our $VERSION = '1.6';
 our $HAVE_XS = 0;
 
 # First four bytes of stream are always fLaC
@@ -189,9 +189,6 @@ sub write_PP {
 	my $totalAvail = 0;
 	my $metadataBlocks = $FLACHEADERFLAG;
 	my $tmpnum;
-
-	use Data::Dump;
-	Data::Dump::dump($self->{'tags'});
 
 	# Make a list of the tags and lengths for packing into the vorbis metadata block
 	foreach (keys %{$self->{'tags'}}) {
