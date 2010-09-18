@@ -1,11 +1,11 @@
 package Audio::FLAC::Header;
 
-# $Id: Header.pm 26 2008-11-08 23:37:45Z dsully $
+# $Id$
 
 use strict;
 use File::Basename;
 
-our $VERSION = '2.3';
+our $VERSION = '2.4';
 our $HAVE_XS = 0;
 
 # First four bytes of stream are always fLaC
@@ -26,10 +26,12 @@ my $BT_VORBIS_COMMENT = 4;
 my $BT_CUESHEET       = 5;
 my $BT_PICTURE        = 6;
 
+my $VENDOR_STRING     = __PACKAGE__ . " v$VERSION";
+
 my %BLOCK_TYPES = (
 	$BT_STREAMINFO     => '_parseStreamInfo',
 	$BT_APPLICATION    => '_parseAppBlock',
-# The seektable isn't actually useful yet, and is a big performance hit. 
+# The seektable isn't actually useful yet, and is a big performance hit.
 #	$BT_SEEKTABLE      => '_parseSeekTable',
 	$BT_VORBIS_COMMENT => '_parseVorbisComments',
 	$BT_CUESHEET       => '_parseCueSheet',
@@ -165,7 +167,7 @@ sub application {
 sub picture {
 	my $self = shift;
 	my $type = shift;
-	   $type = 3 unless defined ($type); # defaults to front cover 
+	   $type = 3 unless defined ($type); # defaults to front cover
 
 	if ($type eq 'all') {
 		return $self->{'allpictures'} if exists($self->{'allpictures'});
@@ -187,7 +189,14 @@ sub picture {
 sub vendor_string {
 	my $self = shift;
 
-	return $self->{'vendor'} || '';
+	return $self->{'tags'}->{'VENDOR'} || '';
+}
+
+sub set_vendor_string {
+	my $self  = shift;
+	my $value = shift || $VENDOR_STRING;
+
+	return $self->{'tags'}->{'VENDOR'} = $value;
 }
 
 sub set_separator {
@@ -201,6 +210,7 @@ sub _write_PP {
 
 	my @tagString = ();
 	my $numTags   = 0;
+	my $numBlocks = 0;
 
 	my ($idxVorbis,$idxPadding);
 	my $totalAvail = 0;
@@ -217,7 +227,12 @@ sub _write_PP {
 	}
 
 	# Create the contents of the vorbis comment metablock with the number of tags
-	my $vorbisComment .= _packInt32($numTags);
+	my $vorbisComment = "";
+
+	# Vendor comment must come first.
+	_addStringToComment(\$vorbisComment, ($self->{'tags'}->{'VENDOR'} || $VENDOR_STRING));
+
+	$vorbisComment .= _packInt32($numTags);
 
 	# Finally, each tag string (with length)
 	foreach (@tagString) {
@@ -260,7 +275,7 @@ sub _write_PP {
 		_addNewMetadataBlock($self, $BT_VORBIS_COMMENT, $vorbisComment);
 	} else {
 		# update the vorbis block
-		_updateMetadataBlock($self, $idxVorbis       , $vorbisComment);
+		_updateMetadataBlock($self, $idxVorbis, $vorbisComment);
 	}
 
 	# Is there a Padding block?
@@ -272,6 +287,26 @@ sub _write_PP {
 		# update the padding block
 		_updateMetadataBlock($self, $idxPadding, "\0" x ($totalAvail - length($vorbisComment)));
 	}
+
+	$numBlocks = @{$self->{'metadataBlocks'}};
+
+	# Sort so that all the padding is at the end.
+	# Our version of FLAC__metadata_chain_sort_padding()
+	for (my $i = 0; $i < $numBlocks; $i++) {
+
+		my $block = $self->{'metadataBlocks'}->[$i];
+
+		if ($block->{'blockType'} == $BT_PADDING) {
+
+			if (my $next = splice(@{$self->{'metadataBlocks'}}, $i+1, 1)) {
+				splice(@{$self->{'metadataBlocks'}}, $i, 1, $next);
+				push @{$self->{'metadataBlocks'}}, $block;
+			}
+                }
+	}
+
+	# Now set the last block.
+	$self->{'metadataBlocks'}->[-1]->{'lastBlockFlag'} = 1;
 
 	# Create the metadata block structure for the FLAC file
 	foreach (@{$self->{'metadataBlocks'}}) {
@@ -287,11 +322,11 @@ sub _write_PP {
 	binmode FLACFILE;
 
 	# overwrite the existing metadata blocks
-	print FLACFILE $metadataBlocks or return 0;
+	my $ret = syswrite(FLACFILE, $metadataBlocks, length($metadataBlocks), 0);
 
 	close FLACFILE;
 
-	return 1;
+	return $ret;
 }
 
 # private methods to this class
@@ -353,7 +388,7 @@ sub _getMetadataBlocks {
 		my $metadataBlockLength = ($BLOCKLENFLAG  & $metadataBlockHeader);
 		   $lastBlockFlag       = ($LASTBLOCKFLAG & $metadataBlockHeader)>>31;
 
-		# If the block size is zero go to the next block 
+		# If the block size is zero go to the next block
 		next unless $metadataBlockLength;
 
 		# Read the contents of the metadata_block
@@ -386,18 +421,18 @@ sub _parseStreamInfo {
 	my $x32 = 0 x 32;
 
 	$info->{'MINIMUMBLOCKSIZE'} = unpack('N', pack('B32', substr($x32 . substr($metaBinString, 0, 16), -32)));
-	$info->{'MAXIMUMBLOCKSIZE'} = unpack('N', pack('B32', substr($x32 . substr($metaBinString, 16, 32), -32)));
+	$info->{'MAXIMUMBLOCKSIZE'} = unpack('N', pack('B32', substr($x32 . substr($metaBinString, 16, 16), -32)));
 	$info->{'MINIMUMFRAMESIZE'} = unpack('N', pack('B32', substr($x32 . substr($metaBinString, 32, 24), -32)));
-	$info->{'MINIMUMFRAMESIZE'} = unpack('N', pack('B32', substr($x32 . substr($metaBinString, 56, 24), -32)));
+	$info->{'MAXIMUMFRAMESIZE'} = unpack('N', pack('B32', substr($x32 . substr($metaBinString, 56, 24), -32)));
 
 	$info->{'SAMPLERATE'}       = unpack('N', pack('B32', substr($x32 . substr($metaBinString, 80, 20), -32)));
 	$info->{'NUMCHANNELS'}      = unpack('N', pack('B32', substr($x32 . substr($metaBinString, 100, 3), -32))) + 1;
-	$info->{'BITSPERSAMPLE'}    = unpack('N', pack('B32', substr($x32 . substr($metaBinString, 100, 5), -32))) + 1;
+	$info->{'BITSPERSAMPLE'}    = unpack('N', pack('B32', substr($x32 . substr($metaBinString, 103, 5), -32))) + 1;
 
 	# Calculate total samples in two parts
 	my $highBits = unpack('N', pack('B32', substr($x32 . substr($metaBinString, 108, 4), -32)));
 
-	$info->{'TOTALSAMPLES'} = $highBits * 2 ** 32 + 
+	$info->{'TOTALSAMPLES'} = $highBits * 2 ** 32 +
 		unpack('N', pack('B32', substr($x32 . substr($metaBinString, 112, 32), -32)));
 
 	# Return the MD5 as a 32-character hexadecimal string
@@ -603,7 +638,7 @@ sub _parseCueSheet {
 			#return -1; # ?? may be harmless to continue ...
 		}
 
-		my $numIndexes = _bin2dec(unpack('B8',substr($tmpBlock,35,1)));		
+		my $numIndexes = _bin2dec(unpack('B8',substr($tmpBlock,35,1)));
 
 		$tmpBlock = substr($tmpBlock,36);
 
@@ -731,7 +766,7 @@ sub _parseSeekTable {
 		# since the table is sorted, a placeholder means were finished
 		last if ($sampleNumber == (0xFFFFFFFF * 2 ** 32 + 0xFFFFFFFF));
 
-		# Offset (in bytes) from the first byte of the first frame header 
+		# Offset (in bytes) from the first byte of the first frame header
 		# to the first byte of the target frame's header.
 		$highbits = unpack('N', substr($seekpoint,8,4));
 		my $streamOffset = $highbits * 2 ** 32 + unpack('N', (substr($seekpoint,12,4)));
@@ -741,7 +776,7 @@ sub _parseSeekTable {
 
 		# add this point to our copy of the table
 		push (@$seektable, {
-			'sampleNumber' => $sampleNumber, 
+			'sampleNumber' => $sampleNumber,
 			'streamOffset' => $streamOffset,
 			'frameSamples' => $frameSamples,
 		});
@@ -780,7 +815,7 @@ sub _samplesToTime {
 
 	if ($totalSeconds == 0) {
 		# handled specially to avoid division by zero errors
-		return "00:00:00";		
+		return "00:00:00";
 	}
 
 	my $trackMinutes  = int(int($totalSeconds) / 60);
@@ -789,20 +824,20 @@ sub _samplesToTime {
 
 	# Poor man's rounding. Needed to match the output of metaflac.
 	$trackFrames = int($trackFrames + 0.5);
-	
-	my $formattedTime = sprintf("%02d:%02d:%02d", $trackMinutes, $trackSeconds, $trackFrames); 
+
+	my $formattedTime = sprintf("%02d:%02d:%02d", $trackMinutes, $trackSeconds, $trackFrames);
 
 	return $formattedTime;
 }
 
 sub _bin2dec {
 	# Freely swiped from Perl Cookbook p. 48 (May 1999)
-	return unpack ('N', pack ('B32', substr(0 x 32 . shift, -32)));
+	return unpack ('N', pack ('B32', substr(0 x 32 . $_[0], -32)));
 }
 
 sub _packInt32 {
 	# Packs an integer into a little-endian 32-bit unsigned int
-	return pack('V', shift)
+	return pack('V', $_[0]);
 }
 
 sub _findMetadataIndex {
@@ -844,13 +879,11 @@ sub _addNewMetadataBlock {
 
 	my $numBlocks = @{$self->{'metadataBlocks'}};
 
-	$self->{'metadataBlocks'}->[$numBlocks-1]->{'lastBlockFlag'}= 0;
-
 	# create a new block
-	$self->{'metadataBlocks'}->[$numBlocks]->{'lastBlockFlag'}  = 1;
-	$self->{'metadataBlocks'}->[$numBlocks]->{'blockType'}      = $htype;
-	$self->{'metadataBlocks'}->[$numBlocks]->{'blockSize'}      = length($contents);
-	$self->{'metadataBlocks'}->[$numBlocks]->{'contents'}       = $contents;
+	$self->{'metadataBlocks'}->[$numBlocks]->{'lastBlockFlag'} = 0;
+	$self->{'metadataBlocks'}->[$numBlocks]->{'blockType'}     = $htype;
+	$self->{'metadataBlocks'}->[$numBlocks]->{'blockSize'}     = length($contents);
+	$self->{'metadataBlocks'}->[$numBlocks]->{'contents'}      = $contents;
 }
 
 sub _updateMetadataBlock {
@@ -860,7 +893,7 @@ sub _updateMetadataBlock {
 
 	# Update the block
 	$self->{'metadataBlocks'}->[$blockIdx]->{'blockSize'} = length($contents);
-	$self->{'metadataBlocks'}->[$blockIdx]->{'contents'} = $contents;
+	$self->{'metadataBlocks'}->[$blockIdx]->{'contents'}  = $contents;
 }
 
 1;
@@ -891,7 +924,7 @@ Audio::FLAC::Header - interface to FLAC header metadata.
 =head1 DESCRIPTION
 
 This module returns a hash containing basic information about a FLAC file,
-a representation of the embedded cue sheet if one exists,  as well as tag 
+a representation of the embedded cue sheet if one exists,  as well as tag
 information contained in the FLAC file's Vorbis tags.
 There is no complete list of tag keys for Vorbis tags, as they can be
 defined by the user; the basic set of tags used for FLAC files include:
@@ -960,7 +993,7 @@ cuesheet metada block. Each element in the array corresponds to one
 line in a .cue file. If there is no cuesheet block in this FLAC file
 the array will be empty. The resulting cuesheet should match the
 output of metaflac's --export-cuesheet-to option, with the exception
-of the FILE line, which includes the actual file name instead of 
+of the FILE line, which includes the actual file name instead of
 "dummy.wav".
 
 =item * seektable( )
@@ -971,7 +1004,7 @@ Returns the seektable. Currently disabled for performance.
 
 Returns the application block for the passed id.
 
-=item * picture( [$type ] ) 
+=item * picture( [$type ] )
 
 Returns a hash containing data from a PICTURE block if found.
 
@@ -981,13 +1014,17 @@ When the passed variable is 'all', an array of hashes containing
 picture data from all PICTURE blocks is returned. Allows for multiple instances
 of the same picture type.
 
-=item * set_separator( ) 
+=item * set_separator( )
 
 For multi-value ID3 tags, set the separator string. Defaults to '/'
 
-=item * vendor_string( ) 
+=item * vendor_string( )
 
 Returns the vendor string.
+
+=item * set_vendor_string( $string )
+
+Set the vendor string. Will be written on write()
 
 =item * write( )
 
@@ -1011,8 +1048,10 @@ Dan Sully, E<lt>daniel@cpan.orgE<gt>
 Pure perl code Copyright (c) 2003-2004, Erik Reckase.
 
 Pure perl code Copyright (c) 2003-2007, Dan Sully & Slim Devices.
+Pure perl code Copyright (c) 2008-2009, Dan Sully
 
 XS code Copyright (c) 2004-2007, Dan Sully & Slim Devices.
+XS code Copyright (c) 2008-2009, Dan Sully
 
 This library is free software; you can redistribute it and/or modify
 it under the same terms as Perl itself, either Perl version 5.8.2 or,
